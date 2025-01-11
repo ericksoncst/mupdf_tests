@@ -113,7 +113,7 @@ void open_and_render_pdf(const char* filename, const char* output_dir) {
 }
 
 int main() {
-    const char* filename = "/home/prodata/Downloads/CV_Erickson.pdf"; // Path to the input PDF file
+    const char* filename = "/home/prodata/Downloads/Alquimia.pdf"; // Path to the input PDF file
     const char* output_dir = "./output_images";  // Path to the folder for saving PNG files relative to the project root
     open_and_render_pdf(filename, output_dir);
     return 0;
