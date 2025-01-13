@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.22)
 project(MuPDFSample)
 
 # Dependencies
@@ -15,6 +15,15 @@ FetchContent_Declare(
 set(BUILD_EXAMPLES OFF CACHE INTERNAL "")
 FetchContent_MakeAvailable(mupdf)
 
+# Fetch nlohmann_json from GitHub
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.10.5  # You can specify the version you need
+)
+
+FetchContent_MakeAvailable(nlohmann_json)
+
 set(MUPDF_BUILD_DIR ${mupdf_SOURCE_DIR}/build/release)
 
 # Step 1: Generate MuPDF build files using `make generate`
@@ -25,6 +34,8 @@ add_custom_target(generate_mupdf
     # Explicitly specify that the output of this step is the libmupdf.a
     # This ensures that `make generate` will be considered complete when libmupdf.a exists
 )
+
+find_package(OpenSSL REQUIRED)
 
 # Step 2: Build MuPDF using `make`
 add_custom_target(build_mupdf
@@ -49,6 +60,9 @@ add_dependencies(${PROJECT_NAME} build_mupdf)
 target_link_libraries(${PROJECT_NAME} 
     ${MUPDF_BUILD_DIR}/libmupdf.a
     ${MUPDF_BUILD_DIR}/libmupdf-third.a
+    nlohmann_json::nlohmann_json
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # Include directories for MuPDF

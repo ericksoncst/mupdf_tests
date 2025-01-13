@@ -1,120 +1,175 @@
 #include <mupdf/fitz.h>
 #include <iostream>
+#include <string>
+#include <vector>
+#include <sstream>
+#include <iomanip>
 #include <stdexcept>
-#include <cstdio>
-#include <sstream>  // To create unique file names
-#include <sys/stat.h>  // For stat() and mkdir()
-#include <unistd.h> // For access() (optional, if needed for checking file/folder existence)
+#include <cstring>
+#include <openssl/evp.h> // Include OpenSSL for Base64 encoding
+#include <nlohmann/json.hpp> // Include the JSON library
 
-// Custom callback to write data to a FILE*
-void file_write_callback(fz_context* ctx, void* state, const void* data, size_t len) {
-    FILE* out_file = static_cast<FILE*>(state);
-    fwrite(data, 1, len, out_file);
+using json = nlohmann::json; // Alias for convenience
+
+// Function to encode data to Base64
+std::string base64_encode(const unsigned char* data, size_t input_length) {
+    if (input_length == 0) return "";
+
+    // Calculate the output length
+    int output_length = 4 * ((input_length + 2) / 3);
+    std::string encoded_data(output_length, '\0');
+
+    // Perform Base64 encoding
+    EVP_EncodeBlock(reinterpret_cast<unsigned char*>(&encoded_data[0]), data, input_length);
+    return encoded_data;
 }
 
-// Custom callback to close the FILE*
-void file_close_callback(fz_context* ctx, void* state) {
-    FILE* out_file = static_cast<FILE*>(state);
-    fclose(out_file);
-}
+// Class to handle PDF rendering
+class PdfRenderer {
+public:
+    PdfRenderer(const std::string& filename);
+    ~PdfRenderer();
 
-// Custom callback to handle dropping the FILE* (no-op in this case)
-void file_drop_callback(fz_context* ctx, void* state) {
-    // Nothing to do here, just prevent the resource from being freed automatically
-}
+    std::vector<unsigned char> renderPage(int page_num); // Method to render a specific page and return raw bytes
+    int getTotalPages(); // Method to get the total number of pages
+    json getMetadata(); // Method to get document metadata as JSON
 
-void create_directory(const std::string& dir) {
-    struct stat st;
-    if (stat(dir.c_str(), &st) == -1) {
-        // Directory doesn't exist, create it
-        if (mkdir(dir.c_str(), 0777) != 0) {
-            std::cerr << "Error creating directory: " << dir << std::endl;
-            throw std::runtime_error("Failed to create directory.");
-        }
-    }
-}
+private:
+    fz_context* ctx;      // MuPDF context
+    fz_document* doc;     // MuPDF document
+    std::string filename;  // Path to the PDF file
+};
 
-void open_and_render_pdf(const char* filename, const char* output_dir) {
-    fz_context* ctx = fz_new_context(nullptr, nullptr, FZ_STORE_UNLIMITED);
+// Constructor: Initializes MuPDF context and opens the document
+PdfRenderer::PdfRenderer(const std::string& filename) : filename(filename), ctx(nullptr), doc(nullptr) {
+    ctx = fz_new_context(nullptr, nullptr, FZ_STORE_UNLIMITED);
     if (!ctx) {
         std::cerr << "Failed to create MuPDF context." << std::endl;
         return;
     }
 
-    try {
-        fz_try(ctx) {
-            fz_register_document_handlers(ctx);
+    fz_register_document_handlers(ctx);
 
-            // Open the document
-            fz_document* doc = fz_open_document(ctx, filename);
-            if (!doc) {
-                throw std::runtime_error("Failed to open document.");
-            }
+    // Open the PDF document
+    fz_try(ctx) {
+        doc = fz_open_document(ctx, filename.c_str());
+    }
+    fz_catch(ctx) {
+        std::cerr << "Failed to open document: " << filename << std::endl;
+        std::cerr << "MuPDF error: " << fz_caught_message(ctx) << std::endl;
+        fz_drop_context(ctx);
+        ctx = nullptr;
+    }
+}
 
-            int page_count = fz_count_pages(ctx, doc);
-            std::cout << "Document opened successfully: " << filename << std::endl;
-            std::cout << "Number of pages: " << page_count << std::endl;
+// Destructor: Cleans up resources
+PdfRenderer::~PdfRenderer() {
+    if (doc) {
+        fz_drop_document(ctx, doc);
+    }
+    if (ctx) {
+        fz_drop_context(ctx);
+    }
+}
 
-            // Ensure the output directory exists
-            create_directory(output_dir);
-
-            // Iterate over pages and render them
-            for (int page_num = 0; page_num < page_count; ++page_num) {
-                fz_page* page = fz_load_page(ctx, doc, page_num);
-
-                // Set the page's rendering matrix (for scaling or positioning)
-                fz_matrix transform = fz_scale(1.0f, 1.0f); // No scaling, just simple 1:1
-                fz_colorspace* cs = fz_device_rgb(ctx);  // Use RGB color space
-                int alpha = 0;  // No transparency
-                fz_pixmap* pixmap = fz_new_pixmap_from_page(ctx, page, transform, cs, alpha);
-
-                if (!pixmap) {
-                    throw std::runtime_error("Failed to create pixmap from page.");
-                }
-
-                // Create a unique filename for each page in the specified output directory
-                std::ostringstream file_name;
-                file_name << output_dir << "/output_page_" << (page_num + 1) << ".png";
-
-                // Open the output file manually using `fopen`
-                FILE* out_file = fopen(file_name.str().c_str(), "wb");
-                if (!out_file) {
-                    throw std::runtime_error("Failed to open output file.");
-                }
-
-                // Create an fz_output from the custom callbacks
-                fz_output* out = fz_new_output(ctx, 1024, out_file, file_write_callback, file_close_callback, file_drop_callback);
-
-                // Write the pixmap as PNG to the output stream
-                std::cout << "Writing page " << (page_num + 1) << " to " << file_name.str() << std::endl;
-                fz_write_pixmap_as_png(ctx, out, pixmap);
-
-                // Close the output file (already handled by callback)
-                fclose(out_file);
-
-                // Drop the pixmap and page to free resources
-                fz_drop_pixmap(ctx, pixmap);
-                fz_drop_page(ctx, page);
-            }
-
-            fz_drop_document(ctx, doc);
-        }
-        fz_catch(ctx) {
-            std::cerr << "MuPDF error: " << fz_caught_message(ctx) << std::endl;
-            throw std::runtime_error("Error in MuPDF library.");
-        }
-    } catch (const std::exception& e) {
-        // Catch standard exceptions
-        std::cerr << "Exception: " << e.what() << std::endl;
+// Method to render a specific page and return raw bytes
+std::vector<unsigned char> PdfRenderer::renderPage(int page_num) {
+    int total_pages = fz_count_pages(ctx, doc);
+    if (page_num < 0 || page_num >= total_pages) {
+        std::cerr << "Invalid page number: " << page_num << std::endl;
+        return {}; // Return an empty vector if the page number is invalid
     }
 
-    // Clean up the MuPDF context
-    fz_drop_context(ctx);
+    // Proceed with rendering the page
+    fz_page* page = fz_load_page(ctx, doc, page_num);
+    fz_matrix transform = fz_scale(1.0f, 1.0f); // No scaling
+    fz_colorspace* cs = fz_device_rgb(ctx);
+    int alpha = 0;
+
+    fz_pixmap* pixmap = fz_new_pixmap_from_page(ctx, page, transform, cs, alpha);
+    if (!pixmap) {
+        std::cerr << "Failed to create pixmap for page: " << page_num << std::endl;
+        fz_drop_page(ctx, page);
+        return {}; // Handle the error appropriately
+    }
+
+    // Convert pixmap to raw bytes
+    size_t image_size = pixmap->w * pixmap->h * 4; // Assuming RGBA
+    std::vector<unsigned char> image_data(image_size);
+    std::memcpy(image_data.data(), pixmap->samples, image_size); // Copy raw bytes
+
+    fz_drop_pixmap(ctx, pixmap); // Clean up the pixmap
+    fz_drop_page(ctx, page); // Clean up the loaded page
+
+    return image_data; // Return the raw image bytes
 }
 
+// Method to get the total number of pages
+int PdfRenderer::getTotalPages() {
+    if (!doc) {
+        std::cerr << "Document not opened." << std::endl;
+        return 0; // Return 0 if document is not opened
+    }
+    return fz_count_pages(ctx, doc); // Pass ctx along with doc
+}
+
+// Method to get document metadata as JSON
+json PdfRenderer::getMetadata() {
+    json metadata_json;
+
+    if (!doc) {
+        std::cerr << "Document not opened." << std::endl;
+        return metadata_json; // Return empty JSON if document is not opened
+    }
+
+    char metadata_buffer[256]; // Buffer to hold metadata strings
+
+    // Retrieve and populate various metadata fields
+    if (fz_lookup_metadata(ctx, doc, FZ_META_INFO_TITLE, metadata_buffer, sizeof(metadata_buffer)) > 0)
+        metadata_json["title"] = metadata_buffer;
+    if (fz_lookup_metadata(ctx, doc, FZ_META_INFO_AUTHOR, metadata_buffer, sizeof(metadata_buffer)) > 0)
+        metadata_json["author"] = metadata_buffer;
+    if (fz_lookup_metadata(ctx, doc, FZ_META_INFO_SUBJECT, metadata_buffer, sizeof(metadata_buffer)) > 0)
+        metadata_json["subject"] = metadata_buffer;
+    if (fz_lookup_metadata(ctx, doc, FZ_META_INFO_KEYWORDS, metadata_buffer, sizeof(metadata_buffer)) > 0)
+        metadata_json["keywords"] = metadata_buffer;
+    if (fz_lookup_metadata(ctx, doc, FZ_META_INFO_CREATOR, metadata_buffer, sizeof(metadata_buffer)) > 0)
+        metadata_json["creator"] = metadata_buffer;
+    if (fz_lookup_metadata(ctx, doc, FZ_META_INFO_PRODUCER, metadata_buffer, sizeof(metadata_buffer)) > 0)
+        metadata_json["producer"] = metadata_buffer;
+    if (fz_lookup_metadata(ctx, doc, FZ_META_INFO_CREATIONDATE, metadata_buffer, sizeof(metadata_buffer)) > 0)
+        metadata_json["creation_date"] = metadata_buffer;
+    if (fz_lookup_metadata(ctx, doc, FZ_META_INFO_MODIFICATIONDATE, metadata_buffer, sizeof(metadata_buffer)) > 0)
+        metadata_json["modification_date"] = metadata_buffer;
+
+    return metadata_json; // Return the JSON object containing metadata
+}
+
+// Example usage
 int main() {
-    const char* filename = "/home/prodata/Downloads/Alquimia.pdf"; // Path to the input PDF file
-    const char* output_dir = "./output_images";  // Path to the folder for saving PNG files relative to the project root
-    open_and_render_pdf(filename, output_dir);
+    std::string filename = "/home/prodata/Downloads/o_poder_do_subconsciente.pdf"; // Path to the PDF file
+    PdfRenderer renderer(filename);
+
+    // Get and print document metadata as JSON
+    json metadata = renderer.getMetadata(); // Get metadata for the document
+    std::cout << "Document Metadata: " << metadata.dump(4) << std::endl; // Pretty print JSON with 4 spaces
+
+    // Get and print all pages images as Base64
+    std::vector<std::string> all_images; // Store Base64 images
+    int total_pages = renderer.getTotalPages(); // Get total pages
+    for (int i = 0; i < total_pages; ++i) {
+        std::vector<unsigned char> image_data = renderer.renderPage(i); // Render each page
+        if (!image_data.empty()) {
+            all_images.push_back(base64_encode(image_data.data(), image_data.size())); // Encode to Base64
+        }
+    }
+
+    json images_json = json::array();
+    for (size_t i = 0; i < 1; ++i) {
+        images_json.push_back({{"page" + std::to_string(i + 1), all_images[i]}}); // Use "page1", "page2", etc.
+    }
+    std::cout << "All Pages Images: " << images_json.dump(4) << std::endl; // Pretty print JSON with 4 spaces
+
     return 0;
 }
+
